@@ -19,6 +19,7 @@
 #include "phasechanges.hpp"
 #include "remeshing.hpp"
 #include "rheology.hpp"
+#include "cuda.hpp"
 
 #ifdef WIN32
 #ifdef _MSC_VER

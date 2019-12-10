@@ -15,13 +15,14 @@
 ## use_R_S = 1: use Rate - State friction law
 ## useexo = 1: import a exodusII mesh (e.g., created with Trelis)
 
-ndims = 2
+ndims = 3
 opt = 2
 openmp = 1
 useadapt = 1
 adaptive_time_step = 1
 use_R_S = 1
 useexo = 0
+usecuda = 1
 
 ifeq ($(ndims), 2)
 	useadapt = 0  # libadaptivity is 3d only
@@ -30,6 +31,19 @@ endif
 
 ifneq ($(adaptive_time_step), 1)
 	use_R_S = 0   # Rate - State friction law only works with adaptive time stepping technique
+endif
+
+ifeq ($(usecuda), 1)
+    ## CUDA compiler
+    NVCC = nvcc
+    # When CUDA is installed as a Ubuntu package
+    #CUDA_LIB = /usr/lib/x86_64-linux-gnu
+	CUDA_CXXFLAGS = -DCUDA
+    CUDA_LIB_DIR = /usr/local/cuda-10.1/lib64
+    CUDA_LDFLAGS = -L$(CUDA_LIB_DIR) -lcudart
+    ifneq ($(OSNAME), Darwin)  # Apple's ld doesn't support -rpath
+        CUDA_LDFLAGS += -Wl,-rpath=$(CUDA_LIB_DIR)
+    endif
 endif
 
 ## Select C++ compiler and set paths to necessary libraries
@@ -45,7 +59,7 @@ ifeq ($(useadapt), 1)
 
 	# flag to link with fortran binding of MPI library
 	#LIB_MPIFORTRAN = -lmpi_mpifh # OpenMPI 1.10.2. Other possibilities: -lmpifort, -lfmpich, -lmpi_f77
-	LIB_MPIFORTRAN = -lfmpich # OpenMPI 1.10.2. Other possibilities: -lmpifort, -lfmpich, -lmpi_f77
+	LIB_MPIFORTRAN = -lmpi_mpifh # OpenMPI 1.10.2. Other possibilities: -lmpifort, -lfmpich, -lmpi_f77
 else
 	CXX = g++
 	CXX_BACKEND = ${CXX}
@@ -187,11 +201,16 @@ INCS =	\
 	utils.hpp \
 	mesh.hpp \
 	markerset.hpp \
-	output.hpp
+	output.hpp \
+	cuda.hpp
 
 OBJS = $(SRCS:.cxx=.$(ndims)d.o)
 
-EXE = dynearthsol$(ndims)d
+ifeq ($(usecuda), 1)
+    EXE = dynearthsol$(ndims)d_cuda
+else
+    EXE = dynearthsol$(ndims)d
+endif
 
 
 ## Libraries
@@ -213,6 +232,15 @@ ifeq ($(ndims), 3)
 	M_INCS += $(TET_INCS)
 	M_OBJS += $(TET_OBJS)
 	CXXFLAGS += -DTHREED
+endif
+
+ifeq ($(usecuda), 1)
+    CUDA_SRCS = cuda/cudaKernel.cu cuda/cudaKernelLaunch.cu
+    CUDA_INCS = cuda/cudaKernel.cuh
+    CUDA_OBJS = $(CUDA_SRCS:.cu=.o)
+    SRCS += fields_cuda.cxx
+    INCS += fields_cuda.hpp
+    CXXFLAGS += $(CUDA_CXXFLAGS)
 endif
 
 ifeq ($(adaptive_time_step), 1)
@@ -269,11 +297,19 @@ $(LIBADAPTIVITY_LIB)/libadaptivity.a: $(LIBADAPTIVITY_DIR)/Makefile $(LIBADAPTIV
 LIBADAPTIVITY_LIBS = $(LIBADAPTIVITY_LIB)/libadaptivity.a $(LFLAGS) $(LIB_MPIFORTRAN)
 CXXFLAGS += $(CPPFLAGS)
 
+ifeq ($(usecuda), 1)
+$(EXE): $(M_OBJS) $(CUDA_OBJS) $(C3X3_DIR)/lib$(C3X3_LIBNAME).a $(ANN_DIR)/lib/lib$(ANN_LIBNAME).a $(LIBADAPTIVITY_LIB)/libadaptivity.a $(OBJS)
+		$(CXX) $(M_OBJS) $(CUDA_OBJS) $(OBJS) $(LDFLAGS) $(BOOST_LDFLAGS) $(CUDA_LDFLAGS) \
+			-L$(C3X3_DIR) -l$(C3X3_LIBNAME) -L$(ANN_DIR)/lib -l$(ANN_LIBNAME) \
+			$(LIBADAPTIVITY_LIBS) \
+			-o $@
+else
 $(EXE): $(M_OBJS) $(C3X3_DIR)/lib$(C3X3_LIBNAME).a $(ANN_DIR)/lib/lib$(ANN_LIBNAME).a $(LIBADAPTIVITY_LIB)/libadaptivity.a $(OBJS)
 		$(CXX) $(M_OBJS) $(OBJS) $(LDFLAGS) $(BOOST_LDFLAGS) \
 			-L$(C3X3_DIR) -l$(C3X3_LIBNAME) -L$(ANN_DIR)/lib -l$(ANN_LIBNAME) \
 			$(LIBADAPTIVITY_LIBS) \
 			-o $@
+endif
 #ifeq ($(OSNAME), Darwin)  # fix for dynamic library problem on Mac
 #		install_name_tool -change libboost_program_options.dylib $(BOOST_LIB_DIR)/libboost_program_options.dylib $@
 ##ifeq ($(useexo), 1)  # fix for dynamic library problem on Mac
@@ -281,10 +317,17 @@ $(EXE): $(M_OBJS) $(C3X3_DIR)/lib$(C3X3_LIBNAME).a $(ANN_DIR)/lib/lib$(ANN_LIBNA
 ##endif
 #endif
 else
+ifeq ($(usecuda), 1)
+$(EXE): $(M_OBJS) $(CUDA_OBJS) $(OBJS) $(C3X3_DIR)/lib$(C3X3_LIBNAME).a $(ANN_DIR)/lib/lib$(ANN_LIBNAME).a
+		$(CXX) $(M_OBJS) $(CUDA_OBJS) $(OBJS) $(LDFLAGS) $(BOOST_LDFLAGS) $(CUDA_LDFLAGS) \
+			-L$(C3X3_DIR) -l$(C3X3_LIBNAME) -L$(ANN_DIR)/lib -l$(ANN_LIBNAME) \
+			-o $@
+else
 $(EXE): $(M_OBJS) $(OBJS) $(C3X3_DIR)/lib$(C3X3_LIBNAME).a $(ANN_DIR)/lib/lib$(ANN_LIBNAME).a
 		$(CXX) $(M_OBJS) $(OBJS) $(LDFLAGS) $(BOOST_LDFLAGS) \
 			-L$(C3X3_DIR) -l$(C3X3_LIBNAME) -L$(ANN_DIR)/lib -l$(ANN_LIBNAME) \
 			-o $@
+endif
 ifeq ($(OSNAME), Darwin)  # fix for dynamic library problem on Mac
 		install_name_tool -change libboost_program_options.dylib $(BOOST_LIB_DIR)/libboost_program_options.dylib $@
 ifeq ($(useexo), 1)  # fix for dynamic library problem on Mac
@@ -320,6 +363,9 @@ $(TRI_OBJS): %.o : %.c $(TRI_INCS)
 	@# Triangle cannot be compiled with -O2
 	$(CXX) $(CXXFLAGS) -O1 -DTRILIBRARY -DREDUCED -DANSI_DECLARATORS -c $< -o $@
 
+$(CUDA_OBJS): %.o : %.cu $(CUDA_INCS)
+	$(NVCC) -O2 -DTHREED -c $< -o $@
+
 tetgen/predicates.o: tetgen/predicates.cxx $(TET_INCS)
 	@# Compiling J. Shewchuk predicates, should always be
 	@# equal to -O0 (no optimization). Otherwise, TetGen may not
@@ -336,16 +382,16 @@ $(ANN_DIR)/lib/lib$(ANN_LIBNAME).a:
 	@+$(MAKE) -C $(ANN_DIR) linux-g++
 
 deepclean: cleanadapt
-	@rm -f $(TET_OBJS) $(TRI_OBJS) $(OBJS) $(EXE)
+	@rm -f $(TET_OBJS) $(TRI_OBJS) $(CUDA_OBJS) $(OBJS) $(EXE)
 	@+$(MAKE) -C $(C3X3_DIR) clean
 	
 cleanall: clean
-	@rm -f $(TET_OBJS) $(TRI_OBJS) $(OBJS) $(EXE)
+	@rm -f $(TET_OBJS) $(TRI_OBJS) $(CUDA_OBJS) $(OBJS) $(EXE)
 	@+$(MAKE) -C $(C3X3_DIR) clean
 	@+$(MAKE) -C $(ANN_DIR) realclean
 
 clean:
-	@rm -f $(OBJS) $(EXE)
+	@rm -f $(OBJS) $(CUDA_OBJS) $(EXE)
 
 cleanadapt:
 	@rm -f $(LIBADAPTIVITY_DIR)/lflags.mk $(LIBADAPTIVITY_DIR)/cppflags.mk

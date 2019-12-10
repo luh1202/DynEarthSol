@@ -268,6 +268,40 @@ struct Variables {
     Array2D<int,1> *hydrous_elemmarkers; // for markersets[hydrous_marker_index] (hydrous markers)
 
     PhaseChange *phch;
+
+#ifdef CUDA
+    //gpu parameters are beginning with d_
+     int *d_connectivity;
+     unsigned int *d_bcflag;
+     double *d_shpdx, *d_shpdy, *d_shpdz;
+     double *d_temperature;
+     double *d_volume;
+     double *d_support;
+     double *d_tmass;
+     double *d_strain_rate;
+     double *d_vel;
+     double *d_dvoldt;
+     double *d_edvoldt;
+     double *d_volume_n;
+     double *d_plstrain;
+     double *d_delta_plstrain;
+     double *d_dpressure;
+     double *d_strain;
+     double *d_stress;
+     double *d_force;
+     double *d_mass;
+     double *d_coord;
+     double *d_cp;
+     int    *d_bdrye;
+     int    *d_bdryf;
+     int    *d_bc_top_e;
+     int    *d_bc_top_f;
+     int    *d_bc_top_n;
+
+     // pinned host parameters are beginning with h_
+     double *h_double_tmp;
+     int    *h_int_tmp;
+#endif
 };
 
 #endif
