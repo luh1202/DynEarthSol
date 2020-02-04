@@ -19,7 +19,10 @@
 #include "phasechanges.hpp"
 #include "remeshing.hpp"
 #include "rheology.hpp"
+#ifdef CUDA
+#include "fields_cuda.hpp"
 #include "cuda.hpp"
+#endif
 
 #ifdef WIN32
 #ifdef _MSC_VER
@@ -271,6 +274,136 @@ void isostasy_adjustment(const Param &param, Variables &var)
 }
 
 
+#ifdef CUDA
+int main(int argc, const char* argv[])
+{
+    double start_time = 0;
+
+#ifdef USE_OMP
+    start_time = omp_get_wtime();
+#endif
+
+    //
+    // read command line
+    //
+    if (argc != 2) {
+        std::cout << "Usage: " << argv[0] << " config_file\n";
+        std::cout << "       " << argv[0] << " -h or --help\n";
+        return -1;
+    }
+
+    Param param;
+    get_input_parameters(argv[1], param);
+
+    //
+    // run simulation
+    //
+    static Variables var; // declared as static to silence valgrind's memory leak detection
+    init_var(param, var);
+
+    Output output(param, start_time,
+                  (param.sim.is_restarting) ? param.sim.restarting_from_frame : 0);
+
+    if (! param.sim.is_restarting) {
+        init(param, var);
+
+        if (param.ic.isostasy_adjustment_time_in_yr > 0) {
+            // output.write(var, false);
+            isostasy_adjustment(param, var);
+        }
+        if (param.sim.has_initial_checkpoint)
+            output.write_checkpoint(param, var);
+    }
+    else {
+        restart(param, var);
+    }
+
+    var.dt = compute_dt(param, var);
+    output.write(var, false);
+
+    double starting_time = var.time; // var.time & var.steps might be set in restart()
+    double starting_step = var.steps;
+    int next_regular_frame = 1;  // excluding frames due to output_during_remeshing
+
+    std::cout << "Starting simulation...\n";
+    //cuda prepare
+    allocate_gpu_variable(param, var);
+
+    // gpu part
+    do {
+        if (var.steps % 10000 == 0) {
+            std::cout << "Time: " << var.time / YEAR2SEC << ", step: " << var.steps << std::endl;
+        }
+
+        var.steps ++;
+        var.time += var.dt;
+        
+        if (param.control.has_thermal_diffusion) {
+            launch_update_temperature(var.d_temperature, var.d_support, var.d_shpdx, var.d_shpdy, var.d_shpdz, var.d_volume, var.d_connectivity, var.d_tmass, var.d_bcflag, var.nelem, var.nnode);
+        }
+
+        launch_update_strain_rate(var.d_connectivity, var.d_shpdx, var.d_shpdy, var.d_shpdz, var.d_strain_rate, var.d_vel, var.d_dvoldt, var.d_edvoldt, var.d_support, var.d_volume, var.d_volume_n, var.nnode, var.nelem);
+
+        launch_update_stress(var.d_stress, var.d_strain_rate, var.d_edvoldt, var.d_strain, var.d_plstrain, var.d_delta_plstrain, var.d_dpressure, var.nelem);
+
+        launch_NMD_stress(var.d_connectivity, var.d_support, var.d_dpressure, var.d_volume, var.d_volume_n, var.d_stress, var.nelem, var.nnode);
+
+        launch_update_force(var.d_connectivity, var.d_shpdx, var.d_shpdy, var.d_shpdz, var.d_stress, var.d_volume, var.d_temperature, var.d_force, var.d_vel, var.d_coord, var.d_bdrye, var.d_bdryf, var.nelem, var.nnode, static_cast<int>(var.bfacets[4].size()));
+
+        launch_update_velocity(var.d_mass, var.d_vel, var.d_force, var.nnode);
+
+        launch_apply_vbcs(var.d_bcflag, var.d_vel, var.nnode);
+
+        launch_update_mesh(var.d_connectivity, var.d_coord, var.d_vel, var.d_volume, var.d_volume_n, var.d_shpdx, var.d_shpdy, var.d_shpdz, var.d_mass, var.d_tmass, var.d_temperature, var.max_vbc_val * param.control.inertial_scaling, var.nelem, var.nnode, static_cast<int>(var.bfacets[5].size()), static_cast<int>(var.bnodes[5].size()), var.d_bc_top_e, var.d_bc_top_f, var.d_bc_top_n, var.d_support, var.d_dvoldt, true);
+
+        // elastic stress/strain are objective (frame-indifferent)
+        if (var.mat->rheol_type & MatProps::rh_elastic) {
+            launch_rotate_stress(var.d_connectivity, var.d_strain, var.d_stress, var.d_shpdx, var.d_shpdy, var.d_shpdz, var.d_vel, var.nelem);
+        }
+
+        const int slow_updates_interval = 10;
+        if (var.steps % slow_updates_interval == 0) {
+            var.dt = compute_dt_gpu(param, var);
+        }
+
+/*
+        if (param.sim.output_averaged_fields)
+            output.average_fields(var);
+*/
+        if ((! param.sim.output_averaged_fields || (var.steps % param.sim.output_averaged_fields == 0)) &&
+            // When output_averaged_fields in turned on, the output cannot be
+            // done at arbitrary time steps.
+            (((var.steps - starting_step) == next_regular_frame * param.sim.output_step_interval) ||
+             ((var.time - starting_time) > next_regular_frame * param.sim.output_time_interval_in_yr * YEAR2SEC)) ) {
+
+            //if (next_regular_frame % param.sim.checkpoint_frame_interval == 0)
+                //output.write_checkpoint(param, var);
+
+            //download the variable from gpu before outputing
+            gpu_download_remeshing(var);
+            output.write(var);
+
+            next_regular_frame ++;
+        }
+
+        if (var.steps % param.mesh.quality_check_step_interval == 0) {
+            int quality_is_bad;
+            quality_is_bad = bad_mesh_quality_gpu(param, var);
+
+            if (quality_is_bad) {
+                remesh_gpu(param, var, quality_is_bad);
+            }
+        }
+    } while (var.steps < param.sim.max_steps && var.time <= param.sim.max_time_in_yr * YEAR2SEC);
+
+    delete_gpu_variable(var);
+
+    std::cout << "Total running time: " << omp_get_wtime() - start_time << std::endl;
+    std::cout << "Ending simulation.\n";
+
+    return 0;
+}
+#else  // if CPU version needed
 int main(int argc, const char* argv[])
 {
     double start_time = 0;
@@ -399,3 +532,6 @@ int main(int argc, const char* argv[])
     std::cout << "Ending simulation.\n";
     return 0;
 }
+#endif // CUDA or CPU
+
+

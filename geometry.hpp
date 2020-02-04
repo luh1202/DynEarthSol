@@ -13,6 +13,7 @@ void compute_edvoldt(const Variables &var, double_vec &dvoldt,
 void NMD_stress(const Variables &var, double_vec &dp_nd, tensor_t& stress);
 
 double compute_dt(const Param& param, const Variables& var);
+double compute_dt_gpu(const Param& param, const Variables& var);
 
 void compute_mass(const Param &param,
                   const int_vec &egroups, const conn_t &connectivity,

@@ -11,6 +11,10 @@
 #include "utils.hpp"
 #include "geometry.hpp"
 
+#ifdef CUDA
+#include "cuda.hpp"
+#endif
+
 
 /* Given two points, returns the distance^2 */
 double dist2(const double* a, const double* b)
@@ -306,6 +310,41 @@ double compute_dt(const Param& param, const Variables& var)
                   << " " << dt_advection << " " << dt_elastic << "\n";
         std::exit(11);
     }
+    return dt;
+}
+
+
+double compute_dt_gpu(const Param& param, const Variables& var)
+{
+    // constant dt
+    if (param.control.fixed_dt != 0) return param.control.fixed_dt;
+
+    double minl = launch_get_minh(var.d_connectivity, var.d_coord, var.d_volume, var.nelem);
+    double dt_maxwell = 0.5 * var.mat->visc_min / (1e-40 + var.mat->shearm(0));
+    double dt_diffusion = 0.5 * minl * minl / var.mat->therm_diff_max;
+
+    double dt_advection = 0.5 * minl / var.max_vbc_val;
+    double dt_elastic = (param.control.is_quasi_static) ?
+        0.5 * minl / (var.max_vbc_val * param.control.inertial_scaling) :
+        0.5 * minl / std::sqrt(var.mat->bulkm(0) / var.mat->rho(0));
+    double dt = std::min(std::min(dt_elastic, dt_maxwell),
+                         std::min(dt_advection, dt_diffusion)) * param.control.dt_fraction;
+
+    if (param.debug.dt) {
+        std::cout << "step #" << var.steps << "  dt: " << dt_maxwell << " " << dt_diffusion
+                  << " " << dt_advection << " " << dt_elastic << " sec\n";
+    }
+    if (dt <= 0) {
+        std::cerr << "Error: dt <= 0!  " << dt_maxwell << " " << dt_diffusion
+                  << " " << dt_advection << " " << dt_elastic << "\n";
+        std::exit(11);
+    }
+
+    if(launch_set_constant_parameters(dt, param.bc.surface_temperature) != 0) {
+        std::cerr << "Error: cannot set gpu constant parameters\n";
+        std::exit(1);
+    }
+
     return dt;
 }
 

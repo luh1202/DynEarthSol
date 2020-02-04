@@ -19,6 +19,10 @@
 #include "markerset.hpp"
 #include "remeshing.hpp"
 
+#ifdef CUDA
+#include "cuda.hpp"
+#endif
+
 #ifdef ADAPT
 
 /* Copyright (C) 2009 Imperial College London.
@@ -1676,4 +1680,385 @@ void remesh(const Param &param, Variables &var, int bad_quality)
     std::cout << "  Remeshing finished.\n";
 }
 
+void remesh_gpu(const Param &param, Variables &var, int bad_quality)
+{
+    std::cout << "  Remeshing starts...\n" << std::flush;
+
+    //download field for remeshing
+    gpu_download_remeshing(var);
+
+    // creating a "copy" of mesh pointer so that they are not deleted
+    array_t old_coord;
+    conn_t old_connectivity;
+    segment_t old_segment;
+    segflag_t old_segflag;
+    old_coord.steal_ref(*var.coord);
+    old_connectivity.steal_ref(*var.connectivity);
+    old_segment.steal_ref(*var.segment);
+    old_segflag.steal_ref(*var.segflag);
+
+#ifdef THREED
+#ifdef ADAPT
+        optimize_mesh(param, var, bad_quality, old_coord, old_connectivity,
+                 old_segment, old_segflag);
+#else
+        new_mesh(param, var, bad_quality, old_coord, old_connectivity,
+                 old_segment, old_segflag);
+#endif
+#else
+        new_mesh(param, var, bad_quality, old_coord, old_connectivity,
+                 old_segment, old_segflag);
+#endif
+
+    renumbering_mesh(param, *var.coord, *var.connectivity, *var.segment, NULL);
+
+    Barycentric_transformation bary(old_coord, old_connectivity, *var.volume);
+
+    // interpolating fields defined on elements
+    nearest_neighbor_interpolation(var, bary, old_coord, old_connectivity);
+
+    // interpolating fields defined on nodes
+    barycentric_node_interpolation(var, bary, old_coord, old_connectivity);
+
+    delete var.support;
+    create_support(var);
+
+    // remap markers. elemmarkers are updated here, too.
+    remap_markers(param, var, old_coord, old_connectivity);
+
+    // memory for new fields
+    reallocate_variables(param, var);
+
+    // updating other arrays
+    create_boundary_flags(var);
+    for (int i=0; i<nbdrytypes; ++i) {
+        var.bnodes[i].clear();
+        var.bfacets[i].clear();
+    }
+    create_boundary_nodes(var);
+    create_boundary_facets(var);
+
+    create_elem_groups(var);
+
+    //upload field for remeshing
+    gpu_upload_remeshing(var);
+
+    if (param.mesh.remeshing_option==1 ||
+        param.mesh.remeshing_option==2 ||
+        param.mesh.remeshing_option==11) {
+        /* Reset coord0 of the bottom nodes */
+        for (auto i=var.bnodes[iboundz0].begin(); i<var.bnodes[iboundz0].end(); ++i) {
+            int n = *i;
+            (*var.coord0)[n][NDIMS-1] = -param.mesh.zlength;
+        }
+    }
+
+    launch_update_mesh(var.d_connectivity, var.d_coord, var.d_vel, var.d_volume, var.d_volume_n, var.d_shpdx, var.d_shpdy, var.d_shpdz, var.d_mass, var.d_tmass, var.d_temperature, var.max_vbc_val * param.control.inertial_scaling, var.nelem, var.nnode, static_cast<int>(var.bfacets[5].size()), static_cast<int>(var.bnodes[5].size()), var.d_bc_top_e, var.d_bc_top_f, var.d_bc_top_n, var.d_support, var.d_dvoldt, false);
+    launch_cuda_device_synchronize();
+
+    std::cout << "  Remeshing finished.\n" << std::flush;
+}
+
+int bad_mesh_quality_gpu(const Param &param, const Variables &var)
+{
+    /* Check the quality of the mesh, return 0 if the mesh quality (by several
+     * measures) is good. Non-zero returned values indicate --
+     * 1: an element has bad quality (too acute / narrow / flat).
+     * 2: a bottom node has moved too far away from the flat bottom.
+     * 3: an element is smaller than (mesh.smallest_size * [volume of a equilateral triangle/tetrahedron
+     *    of side = mesh.resolution]).
+     */
+
+    // check tiny elements
+    const double smallest_vol = param.mesh.smallest_size * sizefactor * std::pow(param.mesh.resolution, NDIMS);
+    double mesh_smallest_vol, worst_quality;
+    launch_get_worst_quality(var.d_connectivity, var.d_coord, &mesh_smallest_vol, &worst_quality, var.nelem);
+    #ifdef THREED
+    // normalizing q so that its magnitude is about the same in 2D and 3D
+        worst_quality = std::pow(worst_quality, 1.0/3);
+    #endif
+    if (mesh_smallest_vol < smallest_vol) {
+        std::cout << "Volume is too small.\n";
+        return 3;
+    }
+
+    // check if any bottom node is too far away from the bottom depth
+    if (param.mesh.remeshing_option == 1 ||
+        param.mesh.remeshing_option == 2 ||
+        param.mesh.remeshing_option == 11) {
+        double bottom = -param.mesh.zlength;
+        const double dist = param.mesh.max_boundary_distortion * param.mesh.resolution;
+        double max_double_distance = launch_max_bottom_distance(var.d_bcflag, var.d_coord, var.nnode, bottom);
+        if (max_double_distance > dist) {
+            std::cout << "Node is too far from the bottom\n";
+            return 2;
+        }
+    }
+
+    // check element distortion
+    if (worst_quality < param.mesh.min_quality) {
+        std::cout << "Mesh quality is bad\n";
+        return 1;
+    }
+
+    return 0;
+}
+
+
+
+void gpu_download_remeshing(Variables &var) {
+    // need download coord and volume first
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_coord, sizeof(double) * var.nnode * NDIMS, 1)) {
+        std::cerr << "Error: cannot copy coord from device to host for coord\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+        for (int i = 0; i < NDIMS; i++) {
+            (*var.coord)[n][i] = var.h_double_tmp[n * NDIMS + i];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_volume, sizeof(double) * var.nelem, 1)) {
+        std::cerr << "Error: cannot copy from device to host for volume\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        (*var.volume)[e] = var.h_double_tmp[e];
+    }
+
+    //other fileds need to be interpolated
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_plstrain, sizeof(double) * var.nelem, 1)) {
+        std::cerr << "Error: cannot copy plstrain from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        (*var.plstrain)[e] = var.h_double_tmp[e];
+    }
+
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_delta_plstrain, sizeof(double) * var.nelem, 1)) {
+        std::cerr << "Error: cannot copy delta_plstrain from device to host for delta_plstrain\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        (*var.delta_plstrain)[e] = var.h_double_tmp[e];
+    }
+
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_strain, sizeof(double) * var.nelem * NSTR, 1)) {
+        std::cerr << "Error: cannot copy strain from device to host for strain\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        for (int i = 0; i < NSTR; i++) {
+            (*var.strain)[e][i] = var.h_double_tmp[i * var.nelem + e];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_stress, sizeof(double) * var.nelem * NSTR, 1)) {
+        std::cerr << "Error: cannot copy stress from device to host for stress\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        for (int i = 0; i < NSTR; i++) {
+            (*var.stress)[e][i] = var.h_double_tmp[i * var.nelem + e];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_temperature, sizeof(double) * var.nnode, 1)) {
+        std::cerr << "Error: cannot copy temperature from device to host for temperature\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+        (*var.temperature)[n] = var.h_double_tmp[n];
+    }
+
+    if (launch_cudaMemcpyAsync(var.h_double_tmp, var.d_vel, sizeof(double) * var.nnode * NDIMS, 1)) {
+        std::cerr << "Error: cannot copy vel from device to host for vel\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+        for (int i = 0; i < NDIMS; i++) {
+            (*var.vel)[n][i] = var.h_double_tmp[n * NDIMS + i];
+        }
+    }
+}
+
+void gpu_upload_remeshing(Variables &var) {
+    std::cout << "Total elements: " << var.nelem << ", total nodes: " << var.nnode << std::endl;
+    if (var.nelem > 2000000 || var.nnode > 400000 || static_cast<int>(var.bfacets[4].size()) > 100000) {
+        std::cerr << "Error: Element number is too large\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        for (int i = 0; i < NODES_PER_ELEM; i++) {
+            var.h_int_tmp[i * var.nelem + e] = (*var.connectivity)[e][i];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_connectivity, var.h_int_tmp, var.nelem * NODES_PER_ELEM * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for connectivity\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+            var.h_int_tmp[n] = (*var.bcflag)[n];
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_bcflag, var.h_int_tmp, var.nnode * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for bcflag\n";
+        std::exit(1);
+    }
+
+    int bs = static_cast<int>(var.bfacets[4].size());
+
+    #pragma omp parallel for
+    for (int e = 0; e < bs; e++) {
+        var.h_int_tmp[e] = var.bfacets[4][e].first;
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_bdrye, var.h_int_tmp, bs * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for volume\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < bs; e++) {
+        var.h_int_tmp[e] = var.bfacets[4][e].second;
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_bdryf, var.h_int_tmp, bs * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for volume\n";
+        std::exit(1);
+    }
+
+    bs = static_cast<int>(var.bfacets[5].size());
+
+    #pragma omp parallel for
+    for (int e = 0; e < bs; e++) {
+        var.h_int_tmp[e] = var.bfacets[5][e].first;
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_bc_top_e, var.h_int_tmp, bs * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for volume\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < bs; e++) {
+        var.h_int_tmp[e] = var.bfacets[5][e].second;
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_bc_top_f, var.h_int_tmp, bs * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for volume\n";
+        std::exit(1);
+    }
+
+    bs = static_cast<int>(var.bnodes[5].size());
+
+    #pragma omp parallel for
+    for (int e = 0; e < bs; e++) {
+        var.h_int_tmp[e] = var.bnodes[5][e];
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_bc_top_n, var.h_int_tmp, bs * sizeof(int), 0) != 0) {
+        std::cerr << "Error: cannot copy from host to device for volume\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+        for (int i = 0; i < NDIMS; i++) {
+            var.h_double_tmp[n * NDIMS + i] = (*var.coord)[n][i];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_coord, var.h_double_tmp, sizeof(double) * var.nnode * NDIMS, 0)) {
+        std::cerr << "Error: cannot copy coord from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        var.h_double_tmp[e] = (*var.plstrain)[e];
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_plstrain, var.h_double_tmp, sizeof(double) * var.nelem, 0)) {
+        std::cerr << "Error: cannot copy plstrain from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        var.h_double_tmp[e] = (*var.delta_plstrain)[e];
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_delta_plstrain, var.h_double_tmp, sizeof(double) * var.nelem, 0)) {
+        std::cerr << "Error: cannot copy delta_plstrain from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        for (int i = 0; i < NSTR; i++) {
+            var.h_double_tmp[i * var.nelem + e] = (*var.strain)[e][i];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_strain, var.h_double_tmp, sizeof(double) * var.nelem * NSTR, 0)) {
+        std::cerr << "Error: cannot copy strain from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int e = 0; e < var.nelem; e++) {
+        for (int i = 0; i < NSTR; i++) {
+            var.h_double_tmp[i * var.nelem + e] = (*var.stress)[e][i];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_stress, var.h_double_tmp, sizeof(double) * var.nelem * NSTR, 0)) {
+        std::cerr << "Error: cannot copy stress from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+        var.h_double_tmp[n] = (*var.temperature)[n];
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_temperature, var.h_double_tmp, sizeof(double) * var.nnode, 0)) {
+        std::cerr << "Error: cannot copy temperature from device to host\n";
+        std::exit(1);
+    }
+
+    #pragma omp parallel for
+    for (int n = 0; n < var.nnode; n++) {
+        for (int i = 0; i < NDIMS; i++) {
+            var.h_double_tmp[n * NDIMS + i] = (*var.vel)[n][i];
+        }
+    }
+
+    if (launch_cudaMemcpyAsync(var.d_vel, var.h_double_tmp, sizeof(double) * var.nnode * NDIMS, 0)) {
+        std::cerr << "Error: cannot copy vel from device to host\n";
+        std::exit(1);
+    }
+}
 
