@@ -1680,6 +1680,7 @@ void remesh(const Param &param, Variables &var, int bad_quality)
     std::cout << "  Remeshing finished.\n";
 }
 
+#ifdef CUDA
 void remesh_gpu(const Param &param, Variables &var, int bad_quality)
 {
     std::cout << "  Remeshing starts...\n" << std::flush;
@@ -2061,4 +2062,4 @@ void gpu_upload_remeshing(Variables &var) {
         std::exit(1);
     }
 }
-
+#endif

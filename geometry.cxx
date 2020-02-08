@@ -313,7 +313,7 @@ double compute_dt(const Param& param, const Variables& var)
     return dt;
 }
 
-
+#ifdef CUDA
 double compute_dt_gpu(const Param& param, const Variables& var)
 {
     // constant dt
@@ -347,7 +347,7 @@ double compute_dt_gpu(const Param& param, const Variables& var)
 
     return dt;
 }
-
+#endif
 
 void compute_mass(const Param &param,
                   const int_vec &egroups, const conn_t &connectivity,
