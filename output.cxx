@@ -39,6 +39,113 @@ Output::~Output()
 {}
 
 
+void Output::write_velocity(const Variables& var)
+{
+    int NTO = 10;//average_interval;//for Large Sumatra,300; for small, 250
+    MarkerSet& ms = *(var.markersets[0]);
+    const double* v = var.vel->data();
+    const double* coord0 = var.coord->data();
+    if (var.steps % NTO == 0) {
+        int n = 4, m[n];
+        // For 90km
+        m[0] = 2087; // @ x_5e3 y_-9.5e3
+        m[1] = 17520;//17454; // @ x_45e3 y_-10e3+
+        m[2] = 32933; // @ x_85e3 y_-9.5e3
+        m[3] = 17469; // @ x_45e3 y_-10e3-
+        for (int k=0; k<n; ++k) {
+
+            int e = ms.get_elem(m[k]);
+            int *conn = (*var.connectivity)[e];
+            double vm = 0, vx =0., vy = 0., vz = 0., center[NDIMS] = {0};
+            ave_velocity(var, e, vm, vx, vy, vz);
+
+            for (int i=0; i<NODES_PER_ELEM; ++i) {
+                for (int j=0; j<NDIMS; ++j)
+                    center[j] += (*var.coord)[conn[i]][j];
+            }
+            for (int d=0; d<NDIMS; ++d)
+                center[d] /= NODES_PER_ELEM;
+
+            double dt = var.dt;
+
+            char bbuffer[256];
+            double M_S = (*var.MAX_shear)[e];//p[0]
+#ifdef RS
+            double s1 = (*var.MAX_shear_0)[e];//p[2]//var.avg_shear_stress / var.slip_area;//(*var.state1)[e];
+            double SV = (*var.slip_velocity)[e];
+            double FC = (*var.friction_coefficient)[e];
+            double R_S = var.seismic_eff; //(*var.RS_shear)[e];
+            int failure = var.number_plf; //(*var.Failure_mode)[e];
+            double pls = (*var.plstrain)[e];
+            double cl = var.S_E+var.K_E;//var.avg_vm / var.slip_area;//(*var.CL)[e];
+#endif
+                        /*
+#ifdef THREED
+            std::snprintf(bbuffer, 255, "%10d\t%12.12e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%3d\n",
+                                  var.steps, var.time/YEAR2SEC, dt/YEAR2SEC, SV, s1,
+                                  FC, center[0], center[1], center[2], M_S, R_S, vm, failure);
+#else
+            std::snprintf(bbuffer, 255, "%10d\t%12.12e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.2e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%3d\n",
+                                  var.steps, var.time/YEAR2SEC, dt/YEAR2SEC, SV, s1, FC, cl,
+                                  center[0], center[1], M_S, R_S, vx, failure);
+#endif
+            */
+            std::snprintf(bbuffer, 255, "%10d\t%12.12e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%12.6e\t%3d\n",
+                                  var.steps, var.time/YEAR2SEC, dt/YEAR2SEC, R_S, center[0], center[NDIMS-1], M_S,
+#ifdef RS
+                                  s1, cl, FC, vz, vx, failure);
+#else
+                                  0., 0., 0., vz, vx, 0.);
+#endif
+            //int aa = 1e6, i0 = var.steps/aa;
+            std::string ss = std::to_string(static_cast<long long>(m[k]));
+            //std::string a = std::to_string(static_cast<long long>(i0));
+            //a = std::string(4 - a.length(), '0') + a;
+            //std::string name("tmp_result//" + ss + "_velocity_" + a +".dat");
+            std::string name("tmp_result/" + ss + "_velocity.dat");
+            std::FILE* d;
+            if (frame == 0)
+                d = std::fopen(name.c_str(), "w");
+            else
+                d = std::fopen(name.c_str(), "a");
+
+            if (d == NULL) {
+                std::cerr << "Error: cannot open file '" << name << "' for writing\n";
+                std::exit(2);
+            }
+
+            if (std::fputs(bbuffer, d) == EOF) {
+                std::cerr << "Error: failed writing to file '" << name << "'\n";
+                std::cerr << "\tbbuffer written:\n";
+                std::cerr << bbuffer << '\n';
+                std::exit(2);
+            }
+            std::fclose(d);
+        }
+    }
+}
+
+void Output::ave_velocity(const Variables& var, int e, double &vm, double &vx, double &vy, double &vz)
+{
+    double v[NDIMS];
+    const int *conn = (*var.connectivity)[e];
+    for (int i=0; i<NODES_PER_ELEM; ++i) {
+        for (int j=0; j<NDIMS; ++j) {
+            v[j] += (*var.vel)[conn[i]][j];
+        }
+    }
+    vx = v[0]/NODES_PER_ELEM;
+    vz = v[NDIMS-1]/NODES_PER_ELEM;
+#ifdef THREED
+    vy = v[1]/NODES_PER_ELEM;
+    vm = std::sqrt(std::pow(vx,2)+std::pow(vy,2)+std::pow(vz,2));
+#else
+    vm = std::sqrt(std::pow(vx,2)+std::pow(vz,2));
+#endif
+}
+
+
+
 void Output::write_info(const Variables& var, double dt)
 {
 #ifdef USE_OMP
@@ -106,6 +213,11 @@ void Output::write(const Variables& var, bool is_averaged)
     bin.write_array(*var.temperature, "temperature", var.temperature->size());
 
     bin.write_array(*var.plstrain, "plastic strain", var.plstrain->size());
+#ifdef RS
+    bin.write_array(*var.state1, "state1", var.state1->size());
+    bin.write_array(*var.slip_velocity, "slip_velocity", var.slip_velocity->size());
+    bin.write_array(*var.CL, "CL", var.CL->size());
+#endif
 
     // Strain rate and plastic strain rate do not need to be checkpointed,
     // so we don't have to distinguish averged/non-averaged variants.
@@ -186,6 +298,11 @@ void Output::write(const Variables& var, bool is_averaged)
     std::cout << "  Output # " << frame
               << ", step = " << var.steps
               << ", time = " << var.time / YEAR2SEC << " yr"
+#ifdef ATS
+              << ", hmin = " << var.hmin << " m"
+              << ", dt_elastic = " << var.dt_elastic/YEAR2SEC << " yr"
+              << ", vmax = " << var.vmax << " m/s"
+#endif
               << ", dt = " << dt / YEAR2SEC << " yr.\n";
 
     frame ++;

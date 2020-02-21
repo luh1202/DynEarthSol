@@ -31,6 +31,22 @@ void allocate_variables(const Param &param, Variables& var)
         var.strain = new tensor_t(e, 0);
         var.stress = new tensor_t(e, 0);
         var.stressyy = new double_vec(e, 0);
+
+#ifdef RS
+        var.MAX_shear = new double_vec(e);
+        var.MAX_shear_0 = new double_vec(e);
+        var.CL = new double_vec(e);
+        var.dl_min = new double_vec(e);
+        var.maxv = new double_vec(e);
+        var.strain_energy = new double_vec(e);
+        var.kinetic_energy = new double_vec(e);
+        var.state1 = new double_vec(e);
+        var.slip_velocity = new double_vec(e);
+        var.friction_coefficient = new double_vec(e);
+        var.RS_shear = new double_vec(e);
+        var.Failure_mode = new double_vec(e);
+#endif
+
     }
 
     var.ntmp= new double_vec(n);
@@ -273,7 +289,37 @@ static void apply_damping(const Param& param, const Variables& var, array_t& for
         }
         break;
     case 4:
-        // rayleigh damping
+        // Rayleigh damping
+        //
+        // Velocity-dependent damping is applied when the following
+        // two conditions are met:
+        //  1) velocity mag. > small_vel
+        //  2) |velocity damping term| > |Cundall damping term|
+        // otherwise, Cundall damping is applied as in case 1.
+        const double* m = &(*var.mass)[0];
+        #pragma omp parallel for default(none)          \
+            shared(var, param, m, ff, v)
+        for (int i=0; i<var.nnode*NDIMS; ++i) {
+            int n = i / NDIMS;
+            double f_C = param.control.damping_factor * std::copysign(ff[i], v[i]); // This is the FLAC damping
+            double f_df = f_C;
+            double shearm = 0., bulkm = 0.;
+            for (int j=0; j<(*var.support)[n].size(); ++j) {
+                int_vec a = (*var.elemmarkers)[(*var.support)[n][j]];
+                shearm += var.mat->shearm((*var.support)[n][j]);
+                bulkm += var.mat->bulkm((*var.support)[n][j]);
+            }
+            shearm /= (*var.support)[n].size();
+            bulkm /= (*var.support)[n].size();
+            if (std::fabs(v[i]) > small_vel) { 
+                // Rayleigh damping
+                double l = 2.0; // 2 * Damping ratio / a_0
+                double K = 9.0*bulkm*shearm / (3*bulkm + shearm);
+                double C = l * std::sqrt(m[n] * K);
+                double f_V = C * v[i]; // This is the Visc damping
+                if (std::fabs(f_C) < std::fabs(f_V)) f_df = f_V;
+            }
+            ff[i] = f[i] - f_df;
         break;
     default:
         std::cerr << "Error: unknown damping_option: " << param.control.damping_option << '\n';

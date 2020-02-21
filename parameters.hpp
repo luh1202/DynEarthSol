@@ -230,6 +230,16 @@ struct Variables {
     double max_vbc_val;
     double compensation_pressure;
 
+#ifdef ATS
+    double vmax, hmin, dt_elastic, dt_min, vmax_shear_zone, CL_min, avg_shear_stress, avg_vm, slip_area;
+    double a0, b0, a1, b1, max_pls, number_plf, seismic_eff, S_E, K_E;
+    double_vec *MAX_shear, *CL, *dl_min, *maxv, *strain_energy, *kinetic_energy, *MAX_shear_0;
+#ifdef RS
+    double_vec *state1, *slip_velocity, *friction_coefficient, *RS_shear, *Failure_mode;
+#endif
+    
+#endif
+    
     // These 5 arrays are allocated by external library
     array_t *coord;
     conn_t *connectivity;

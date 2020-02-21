@@ -297,6 +297,69 @@ namespace {
         inject_field(idx, is_changed, elems_vec, ratios_vec, *var.stressyy, *a);
         delete var.stressyy;
         var.stressyy = a;
+
+#ifdef RS
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.CL, *a);
+        delete var.CL;
+        var.CL = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.MAX_shear, *a);
+        delete var.MAX_shear;
+        var.MAX_shear = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.MAX_shear_0, *a);
+        delete var.MAX_shear_0;
+        var.MAX_shear_0 = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.dl_min, *a);
+        delete var.dl_min;
+        var.dl_min = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.maxv, *a);
+        delete var.maxv;
+        var.maxv = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.strain_energy, *a);
+        delete var.strain_energy;
+        var.strain_energy = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.kinetic_energy, *a);
+        delete var.kinetic_energy;
+        var.kinetic_energy = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.state1, *a);
+        delete var.state1;
+        var.state1 = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.slip_velocity, *a);
+        delete var.slip_velocity;
+        var.slip_velocity = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.friction_coefficient, *a);
+        delete var.friction_coefficient;
+        var.friction_coefficient = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.RS_shear, *a);
+        delete var.RS_shear;
+        var.RS_shear = a;
+
+        a = new double_vec(e);
+        inject_field(idx, is_changed, elems_vec, ratios_vec, *var.Failure_mode, *a);
+        delete var.Failure_mode;
+        var.Failure_mode = a;
+#endif
+        
     }
 
 } // anonymous namespace

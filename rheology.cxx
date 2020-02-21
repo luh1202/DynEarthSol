@@ -152,7 +152,11 @@ static void elasto_plastic(double bulkm, double shearm,
                            double amc, double anphi, double anpsi,
                            double hardn, double ten_max,
                            const double* de, double& depls, double* s,
+#ifdef RS
+                           double &failure_mode)
+#else
                            int &failure_mode)
+#endif
 {
     /* Elasto-plasticity (Mohr-Coulomb criterion)
      *
@@ -304,7 +308,11 @@ static void elasto_plastic2d(double bulkm, double shearm,
                              double hardn, double ten_max,
                              const double* de, double& depls,
                              double* s, double &syy,
+#ifdef RS
+                             double &failure_mode)
+#else
                              int &failure_mode)
+#endif
 {
     /* Elasto-plasticity (Mohr-Coulomb criterion) */
 
@@ -514,6 +522,12 @@ void update_stress(const Variables& var, tensor_t& stress,
 {
     const int rheol_type = var.mat->rheol_type;
 
+#ifdef RS
+    var.avg_shear_stress = 0.;
+    var.avg_vm = 0.;
+    var.slip_area = 0.;
+#endif    
+
     #pragma omp parallel for default(none)                           \
         shared(var, stress, stressyy, dpressure, strain, plstrain, delta_plstrain, \
                strain_rate, std::cerr)
@@ -523,8 +537,73 @@ void update_stress(const Variables& var, tensor_t& stress,
         double& syy = stressyy[e];
         double* es = strain[e];
         double* edot = strain_rate[e];
-	double old_s = trace(s);
+        double old_s = trace(s);
 
+        const int *conn = (*var.connectivity)[e];
+        double center_x = 0., center_z = 0., T = 0.;
+        for (int i=0; i<NODES_PER_ELEM; ++i){
+            center_x += (*var.coord)[conn[i]][0];
+            center_z += (*var.coord)[conn[i]][NDIMS-1];
+            T += (*var.temperature)[conn[i]];
+        }
+        T /= NODES_PER_ELEM;
+        center_x /= NODES_PER_ELEM;
+        center_z /= NODES_PER_ELEM;
+        // Find the most abundant marker mattype in this element
+        int_vec &a = (*var.elemmarkers)[e];
+        int material = std::distance(a.begin(), std::max_element(a.begin(), a.end()));
+#ifdef RS
+        double SV = std::max(1e-19, (*var.slip_velocity)[e]);
+        double BCcoeff[NODES_PER_ELEM], direct_a, evolution_b, characteristic_velocity, static_friction_coefficient;
+        double tt = 45e3;//center_x;//45e3;
+        friction_variables(tt, direct_a, evolution_b, characteristic_velocity, static_friction_coefficient);
+
+        double S1 = (*var.state1)[e];
+        double p[3];
+        int dim = NDIMS;
+#ifdef THREED
+        // eigenvectors
+        double v[3][3];
+        principal_stresses3(s, p, v);
+#else
+        if (var.mat->is_plane_strain) {
+            double s0 = 0.5 * (s[0] + s[1]);
+            double rad = 0.5 * std::sqrt((s[0]-s[1])*(s[0]-s[1]) + 4*s[2]*s[2]);
+            double si = s0 - rad;
+            double sii = s0 + rad;
+            dim = 3;
+            if (syy > sii) {
+                p[0] = si;
+                p[1] = sii;
+                p[2] = syy;
+            }
+            else if (syy < si) {
+                p[0] = syy;
+                p[1] = si;
+                p[2] = sii;
+            }
+            else {
+                p[0] = si;
+                p[1] = syy;
+                p[2] = sii;
+            }
+        }
+        else {
+            // In 2D, we only construct the eigenvectors from
+            // cos(2*theta) and sin(2*theta) of Mohr circle
+            double cos2t, sin2t;
+            principal_stresses2(s, p, cos2t, sin2t);
+        }
+#endif
+        double normal_traction = std::fabs(p[0] + p[dim-1])/2, normal;
+        for (int i=0; i<dim; ++i) normal += p[i] / dim;
+        normal = std::fabs(normal);
+#endif  
+        // use different rheology as needed
+        int r = rheol_type;
+        if (material != 0 )
+            r = MatProps::rh_maxwell;//rh_elastic; rh_maxwell
+        
         // anti-mesh locking correction on strain rate
         if(1){
             double div = trace(edot);
@@ -567,7 +646,37 @@ void update_stress(const Variables& var, tensor_t& stress,
                 double shearm = var.mat->shearm(e);
                 double viscosity = var.mat->visc(e);
                 double dv = (*var.volume)[e] / (*var.volume_old)[e] - 1;
+#ifdef RS
+                if (material == 10) {
+                    double A = 2*characteristic_velocity*std::exp(-(static_friction_coefficient+evolution_b*S1)/direct_a);
+                    double tphi = std::fabs(direct_a * std::asinh(SV/A));
+                    double shear_max = std::fabs(direct_a * normal * std::asinh(SV/A));
+                    double eff_friction = std::sqrt((1-shear_max/normal*shear_max/normal)/(shear_max/normal));
+                    (*var.RS_shear)[e] = shear_max * (1 - var.mat->pore_pressure_factor);
+                    //friction_coefficient[e] = shear_max/normal;
+                    double min_strain_rate = 1e-45;
+                    double eII = std::max(second_invariant(edot), min_strain_rate);
+                    viscosity = eff_friction*shear_max/eII;
+                    (*var.friction_coefficient)[e] = viscosity;
+                }
+#endif
                 maxwell(bulkm, shearm, viscosity, var.dt, dv, de, s);
+#ifdef RS                
+                // eigenvalues (principal stresses)
+                double p[NDIMS];
+#ifdef THREED
+                // eigenvectors
+                double v[3][3];
+                principal_stresses3(s, p, v);
+#else
+                // In 2D, we only construct the eigenvectors from
+                // cos(2*theta) and sin(2*theta) of Mohr circle
+                double cos2t, sin2t;
+                principal_stresses2(s, p, cos2t, sin2t);
+#endif
+                (*var.MAX_shear)[e] = p[0];//std::fabs(0.5 * (p[0] - p[NDIMS-1]));
+                (*var.MAX_shear_0)[e] = p[NDIMS-1];//(*var.MAX_shear)[e];
+#endif                
             }
             break;
         case MatProps::rh_ep:
@@ -578,7 +687,26 @@ void update_stress(const Variables& var, tensor_t& stress,
                 double amc, anphi, anpsi, hardn, ten_max;
                 var.mat->plastic_props(e, plstrain[e],
                                        amc, anphi, anpsi, hardn, ten_max);
+#ifdef RS
+                double A = 2*characteristic_velocity*std::exp(-(static_friction_coefficient+evolution_b*S1)/direct_a);
+                double phi_RS = static_friction_coefficient + (direct_a - evolution_b) * log(SV / characteristic_velocity);//std::fabs(direct_a * std::asinh(SV/A)); // RS friction_coefficient
+                double phi = std::fabs(std::atan(phi_RS)); // RS friction_angle
+                double cohesion = 4e6;// + normal_traction * (phi_RS-static_friction_coefficient); //amc / 2;//normal_traction * phi_RS;
+                anphi = (1 + std::sin(phi)) / (1 - std::sin(phi));
+                //amc *= std::sqrt(anphi);//2 * cohesion * std::sqrt(anphi);
+                amc = 2 * cohesion * std::sqrt(anphi);
+                ten_max = (phi == 0)? 1e9 : std::min(1e9, cohesion/std::tan(phi));
+                double failure_mode = var.mat->pore_pressure_factor + material;
+                //double pore_pressure = 0.0;
+                //for (int i=0; i<3; i++)
+                //    pore_pressure += p[i] * var.mat->pore_pressure_factor;
+                //pore_pressure = pore_pressure/3;
+                //ten_max += pore_pressure;
+                //amc *= 1 - var.mat->pore_pressure_factor;
+                double yield_stress = amc;
+#else
                 int failure_mode;
+#endif
                 if (var.mat->is_plane_strain) {
                     elasto_plastic2d(bulkm, shearm, amc, anphi, anpsi, hardn, ten_max,
                                      de, depls, s, syy, failure_mode);
@@ -589,6 +717,20 @@ void update_stress(const Variables& var, tensor_t& stress,
                 }
                 plstrain[e] += depls;
                 delta_plstrain[e] = depls;
+#ifdef RS
+                (*var.MAX_shear)[e] = ten_max;//p[0]
+                (*var.MAX_shear_0)[e] = amc;//p[2]
+                (*var.strain_energy)[e] = hardn;
+                if (center_z < -10e3) {
+                    var.avg_vm += SV * (*var.volume)[e];
+                    var.avg_shear_stress += ten_max * (*var.volume)[e];
+                    var.slip_area += (*var.volume)[e];
+                }
+                (*var.RS_shear)[e] = normal; //shear_max * (1 - var.mat->pore_pressure_factor);
+                (*var.friction_coefficient)[e] = std::sqrt(anphi);
+                (*var.Failure_mode)[e] = (failure_mode != 0/*amc > yield_stress*//*cohesion * std::sqrt(anphi)*/)? 1 : 0; // 1 if shear greater than yield
+#endif
+
             }
             break;
         case MatProps::rh_evp:
@@ -610,7 +752,21 @@ void update_stress(const Variables& var, tensor_t& stress,
                 // stress due to elasto-plastic rheology
                 double sp[NSTR], spyy;
                 for (int i=0; i<NSTR; ++i) sp[i] = s[i];
+#ifdef RS
+                double A = 2*characteristic_velocity*std::exp(-(static_friction_coefficient+evolution_b*S1)/direct_a);
+                double tphi = std::fabs(direct_a * std::asinh(SV/A));
+                double shear_max = std::fabs(direct_a * normal * std::asinh(SV/A));
+                double phi_RS = std::fabs(direct_a * std::asinh(SV/A));
+
+                double phi = std::atan(tphi);
+                double cohesion = normal_traction * phi_RS;//(static_friction_coefficient + (phi_RS - phi_0));
+                //anphi = (1 + std::sin(phi)) / (1 - std::sin(phi));
+                amc = 2 * cohesion * std::sqrt(anphi);
+                ten_max = (phi == 0)? 1e9 : std::min(1e9, cohesion/std::tan(phi));
+                double failure_mode = var.mat->pore_pressure_factor + material;
+#else
                 int failure_mode;
+#endif
                 if (var.mat->is_plane_strain) {
                     spyy = syy;
                     elasto_plastic2d(bulkm, shearm, amc, anphi, anpsi, hardn, ten_max,
@@ -630,7 +786,15 @@ void update_stress(const Variables& var, tensor_t& stress,
                     plstrain[e] += depls;
                     delta_plstrain[e] = depls;
                     syy = spyy;
+#ifdef RS
+                    (*var.Failure_mode)[e] = failure_mode*1.0;
                 }
+                (*var.RS_shear)[e] = shear_max * (1 - var.mat->pore_pressure_factor);
+                (*var.friction_coefficient)[e] = cohesion;//shear_max/normal;
+                (*var.MAX_shear)[e] = ten_max;
+#else
+                }
+#endif
             }
             break;
         default:
@@ -644,3 +808,114 @@ void update_stress(const Variables& var, tensor_t& stress,
         // std::cerr << '\n';
     }
 }
+
+
+
+#ifdef RS
+void friction_variables(double &T, double &direct_a, double &evolution_b, double &characteristic_velocity, double &static_friction_coefficient)
+{
+//    double T1 = 0, T2 = 19e3, T3 = 20e3, T4 = 21.5e3, T5 = 22e3, T6 = 90e3;
+    double T1 = 0, T2 = 43e3,T3 = 45e3, T4 = 45e3, T5 = 47e3, T6 = 90e3;
+    T = std::fabs(T);
+    double vc1 = 1e-6, vc2 = 1e-6, vc3 = 1e-6, vc4 = 1e-6, vc5 = 1e-6, vc6 = 1e-6;
+    double a1 = 0.019, a2 = 0.019, a3 = 0.015, a4 = 0.015, a5 = 0.019, a6 = 0.019;
+    double b1 = 0.015, b2 = 0.015, b3 = 0.019, b4 = 0.019, b5 = 0.015, b6 = 0.015;
+    double f0_1 = 0.6, f0_2 = 0.6, f0_3 = 0.6, f0_4 = 0.6, f0_5 = 0.6, f0_6 = 0.6;
+
+    if (T < T2) {
+        double f = (f0_2-f0_1)/(T2-T1);
+        double a = (a2-a1)/(T2-T1);
+        double b = (b2-b1)/(T2-T1);
+        double vc = (vc2-vc1)/(T2-T1);
+        static_friction_coefficient = T*f+(f0_1-f*T1);
+        direct_a = T*a+(a1-a*T1);
+        evolution_b = T*b+(b1-b*T1);
+        characteristic_velocity = T*vc+(vc1-vc*T1);
+    }
+    else if (T >= T2 && T < T3) {
+        double f = (f0_3-f0_2)/(T3-T2);
+        double a = (a3-a2)/(T3-T2);
+        double b = (b3-b2)/(T3-T2);
+        double vc = (vc3-vc2)/(T3-T2);
+        static_friction_coefficient = T*f+(f0_2-f*T2);
+        direct_a = T*a+(a2-a*T2);
+        evolution_b = T*b+(b2-b*T2);
+        characteristic_velocity = T*vc+(vc2-vc*T2);
+    }
+    else if (T >= T3 && T < T4) {
+        double f = (f0_4-f0_3)/(T4-T3);
+        double a = (a4-a3)/(T4-T3);
+        double b = (b4-b3)/(T4-T3);
+        double vc = (vc4-vc3)/(T4-T3);
+        static_friction_coefficient = T*f+(f0_3-f*T3);
+        direct_a = T*a+(a3-a*T3);
+        evolution_b = T*b+(b3-b*T3);
+        characteristic_velocity = T*vc+(vc3-vc*T3);
+    }
+    else if (T >= T4 && T < T5) {
+        double f = (f0_5-f0_4)/(T5-T4);
+        double a = (a5-a4)/(T5-T4);
+        double b = (b5-b4)/(T5-T4);
+        double vc = (vc5-vc4)/(T5-T4);
+        static_friction_coefficient = T*f+(f0_4-f*T4);
+        direct_a = T*a+(a4-a*T4);
+        evolution_b = T*b+(b4-b*T4);
+        characteristic_velocity = T*vc+(vc4-vc*T4);
+    }
+    else {
+        double f = (f0_6-f0_5)/(T6-T5);
+        double a = (a6-a5)/(T6-T5);
+        double b = (b6-b5)/(T6-T5);
+        double vc = (vc6-vc5)/(T6-T5);
+        static_friction_coefficient = T*f+(f0_5-f*T5);
+        direct_a = T*a+(a5-a*T5);
+        evolution_b = T*b+(b5-b*T5);
+        characteristic_velocity = T*vc+(vc5-vc*T5);
+    }
+}
+
+void update_state1(const Variables &var, double_vec &state1, double_vec &slip_velocity, int a)
+{
+    double *v[NODES_PER_ELEM];
+        #pragma omp parallel for default(none) \
+        shared(var, state1, std::cerr, slip_velocity, a) private(v)
+
+    for (int e=0; e<var.nelem; ++e) {
+        double Vc = 1e-6, V_slip = 0., V_slip_m[3] = {0., 0., 0.}, vm =0.;
+        const int *conn = (*var.connectivity)[e];
+        for (int i=0; i<NODES_PER_ELEM; ++i) {
+            for (int j=0; j<NDIMS; ++j)
+                V_slip_m[j] += (*var.vel)[conn[i]][j];
+        }
+#ifdef THREED
+        vm = std::sqrt(std::pow(V_slip_m[0]/NODES_PER_ELEM,2)+std::pow(V_slip_m[1]/NODES_PER_ELEM,2)+std::pow(V_slip_m[2]/NODES_PER_ELEM,2));
+#else
+        vm = std::sqrt(std::pow(V_slip_m[0]/NODES_PER_ELEM,2)+std::pow(V_slip_m[1]/NODES_PER_ELEM,2));
+#endif
+        slip_velocity[e] = std::max(1e-19, vm);
+
+        if (std::isnan(slip_velocity[e])) {
+            std::cerr << "Error: V_slip becomes NaN\n";
+            std::exit(11);
+        }
+        if (std::isinf(slip_velocity[e])) {
+            std::cerr << "Error: V_slip becomes inf\n";
+            std::exit(11);
+        }
+        double L = (*var.CL)[e], s1 = state1[e];
+        // Slowness RS
+        if (std::fabs(slip_velocity[e]*var.dt/L) <= Vc)
+            state1[e] = log(exp(s1)*(1-slip_velocity[e]*var.dt/L)+Vc*var.dt/L);
+        else
+            state1[e] = log(Vc/slip_velocity[e]+(exp(s1)-Vc/slip_velocity[e])*exp(0-slip_velocity[e]*var.dt/L));
+
+        // Composite RS --- Kato and Tullis, 2001
+        /*if (slip_velocity[e] == 0)
+            state1[e] += var.dt/YEAR2SEC;
+        else
+            state1[e] += var.dt/YEAR2SEC * (exp(-slip_velocity[e] / 1e-8) - state1[e] * slip_velocity[e] / L * log(state1[e] * slip_velocity[e] / L));
+        */
+    }
+}
+#endif
+
