@@ -151,9 +151,9 @@ all:
 	@false
 endif
 
-## Is this a mercurial repository?
-HAS_HG := $(shell hg log -r tip --template '{node}' 2>/dev/null)
-
+## Is this a git repository?
+HAS_GIT := $(shell git rev-parse --is-inside-work-tree 2> /dev/null)
+#$(info $$HAS_GIT is [${HAS_GIT}])
 ##
 
 SRCS =	\
@@ -299,18 +299,24 @@ take-snapshot:
 	@echo '  '  CXX=$(CXX) opt=$(opt) openmp=$(openmp) >> snapshot.diff
 	@echo '  '  PATH=$(PATH) >> snapshot.diff
 	@echo '  '  LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) >> snapshot.diff
-ifneq ($(HAS_HG),)
+ifneq ($(HAS_GIT), "true")
 	@echo >> snapshot.diff
 	@echo >> snapshot.diff
 	@echo '==== Summary of the code ====' >> snapshot.diff
-	@hg summary >> snapshot.diff
+	@git show -s >> snapshot.diff
 	@echo >> snapshot.diff
+	@echo >> snapshot.diff
+	@git status >> snapshot.diff
 	@echo >> snapshot.diff
 	@echo '== Code modification (not checked-in) ==' >> snapshot.diff
-	@hg diff >> snapshot.diff
-	@hg log --patch -r "draft()" >> snapshot.diff
+	@echo >> snapshot.diff
+	@git diff HEAD >> snapshot.diff
+	@echo >> snapshot.diff
+	@echo '== Code modification (not published) ==' >> snapshot.diff
+	@echo >> snapshot.diff
+	@git log --patch -r origin/master.. >> snapshot.diff
 else
-	@echo \'hg\' is not in path, cannot take code snapshot. >> snapshot.diff
+	@echo Either \'git\' is not in path or not a repository. Cannot take code snapshot. >> snapshot.diff
 endif
 
 $(OBJS): %.$(ndims)d.o : %.cxx $(INCS)
