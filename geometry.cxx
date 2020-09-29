@@ -262,7 +262,8 @@ double compute_dt(const Param& param, const Variables& var)
     double maxv = -std::numeric_limits<double>::max();
     double dt_min = std::numeric_limits<double>::max();
     double dt_v = std::numeric_limits<double>::max();
-    var.vmax_shear_zone = 0.0;
+    double cl_min = std::numeric_limits<double>::max();
+    //var.vmax_shear_zone = 0.0;
 #endif
 
 
@@ -313,82 +314,28 @@ double compute_dt(const Param& param, const Variables& var)
                                     0.5 * minh * minh / var.mat->therm_diff_max);
         minl = std::min(minl, minh);
 #ifdef ATS
-        int_vec &m = (*var.elemmarkers)[e];
-        int material = std::distance(m.begin(), std::max_element(m.begin(), m.end()));
-        // Energy calculation
-        (*var.kinetic_energy)[e] = var.mat->rho(e) * (*var.slip_velocity)[e] * (*var.slip_velocity)[e] * (*var.volume)[e]/ 2;
-        (*var.strain_energy)[e] *= (*var.volume)[e];
-//      var.K_E += (*var.kinetic_energy)[e];
-        if (material == 0) {
-            var.number_plf += (*var.Failure_mode)[e];
-            var.S_E += (*var.strain_energy)[e];
-            var.K_E += (*var.kinetic_energy)[e];
-        }
-
-        double vem = 0.;
         for (int i=0; i<NODES_PER_ELEM; ++i) {
             for (int j=0; j<NDIMS; ++j) {
-                vem = std::max(vem, std::fabs(v[i][j]));
                 maxv = std::max(maxv, std::fabs(v[i][j]));
             }
         }
-        (*var.maxv)[e] = std::max(vem, 1e-12);
-        if (material == 0) var.vmax_shear_zone = std::max((*var.maxv)[e], var.vmax_shear_zone);
-        dt_min = std::min(dt_min, minh/std::sqrt(var.mat->shearm(e)/var.mat->rho(e)) /5);
-#ifdef RS
-        (*var.dl_min)[e] = minh;
-#endif
-    }
-    var.seismic_eff = var.K_E / (var.S_E+var.K_E);
+        dt_min = std::min(dt_min, 0.2*minh/std::sqrt(var.mat->shearm(e)/var.mat->rho(e)));
+    } // end of for nelem
+
     var.hmin = minl;
-    var.vmax = std::max(maxv, var.max_vbc_val);
-    dt_v = (*var.CL)[0]/var.vmax/5;
-
-    double cl_min = 1000., pls;
-    for (int e=0; e<nelem; ++e) {
-        pls += (*var.plstrain)[e];
-        int_vec &m = (*var.elemmarkers)[e];
-        int material = std::distance(m.begin(), std::max_element(m.begin(), m.end()));
-        double* s = (*var.stress)[e];
-        double normal_stress = 0.;
-        for (int i=0; i<NDIMS; ++i) normal_stress += std::fabs(s[i] / NDIMS);
-        const int *conn = (*var.connectivity)[e];
-        double zcenter = 0, xcenter = 0, T = 0.;
-        for (int i=0; i<NODES_PER_ELEM; ++i) {
-            zcenter += (*var.coord)[conn[i]][NDIMS-1];
-            xcenter += (*var.coord)[conn[i]][0];
-            T += (*var.temperature)[conn[i]];
-        }
-        T /= NODES_PER_ELEM;
-        zcenter /= NODES_PER_ELEM;
-        xcenter /= NODES_PER_ELEM;
-        xcenter = 45e3;
-        double a_b = 0.008;
-        double direct_a, evolution_b, characteristic_velocity, static_friction_coefficient;
-        friction_variables(xcenter, direct_a, evolution_b, characteristic_velocity, static_friction_coefficient);
-        (*var.CL)[e] = /*3e-3 * (a_b + direct_a - evolution_b) / 0.004;/*/(*var.dl_min)[e]  * std::max(normal_stress/*10*3000*std::fabs(zcenter)*/, 5e7) * (a_b + direct_a - evolution_b) * 0.75 * M_PI / 4 / var.mat->shearm(e);
-        if (material == 1 || var.steps < 10) (*var.CL)[e] = 3e-3;//3e-3;
-        /*if (material != 1)*/ cl_min = std::min(cl_min, (*var.CL)[e]);
-    }
-    var.max_pls = pls;
-    var.CL_min = cl_min;
-    dt_v = cl_min/var.vmax/5;
-
+    var.vmax = std::max(maxv, var.max_vbc_val); 
+    if (var.time < param.sim.loading_in_yr * YEAR2SEC) 
+        var.vmax = var.max_vbc_val;
+    dt_v = 0.2 * cl_min/var.vmax;
+   
     double dt_advection = 0.5 * minl / var.vmax;
     double dt_elastic = (param.control.is_quasi_static) ?
         0.5 * minl / (var.vmax * param.control.inertial_scaling) :
         0.5 * minl / std::sqrt(var.mat->bulkm(0) / var.mat->rho(0));
-    var.dt_elastic = dt_elastic;// dt_elastic; dt_v;
+    var.dt_elastic = dt_elastic;
     var.dt_min = dt_min;
-    /*
-    double c_elastic = var.max_vbc_val * param.control.inertial_scaling;
-    double c_v = var.vmax;// * var.hmin / (*var.CL)[0];
-    if (var.vmax <= var.max_vbc_val) {
-        if (c_elastic <= c_v) dt_elastic = 0.5 * minl / c_v;
-            var.dt_elastic = dt_elastic;
-    }*/
 #else
-    }
+    } // end for nelem
 
     double dt_advection = 0.5 * minl / var.max_vbc_val;
     double dt_elastic = (param.control.is_quasi_static) ?

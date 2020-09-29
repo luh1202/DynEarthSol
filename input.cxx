@@ -419,6 +419,9 @@ static void declare_parameters(po::options_description &cfg,
         ("mat.therm_cond", po::value<std::string>()->default_value("[3]"),
          "Thermal conductivity of the materials '[d0, d1, d2, ...]' (in W/m/Kelvin)")
 
+        ("mat.a_b", po::value<std::string>()->default_value("[0]"),
+         "Rate-and-state coefficient (a-b) of the materials '[d0, d1, d2, ...]' (no unit)")
+
         ("mat.pls0", po::value<std::string>()->default_value("[0]"),
          "Plastic strain of the materials where weakening starts '[d0, d1, d2, ...]' (no unit)")
         ("mat.pls1", po::value<std::string>()->default_value("[0.1]"),
