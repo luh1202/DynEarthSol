@@ -529,7 +529,7 @@ static void elasto_plastic_rs(double bulkm, double shearm,
                               double amc, double anphi, double anpsi,
                               double hardn, double ten_max,
                               const double* de, double pore_pressure_factor, 
-                              double &depls, double* s, double &pmean,
+                              double &depls, double* s,
                               int &failure_mode)
 {
     /* Elasto-plasticity (Mohr-Coulomb criterion)
@@ -567,7 +567,6 @@ static void elasto_plastic_rs(double bulkm, double shearm,
 
     if (fs > 0 && ft < 0) {
         // no failure
-        pmean = std::fabs(0.5 * (p[0] - p[2]));
         return;
     }
 
@@ -592,7 +591,7 @@ static void elasto_plastic_rs(double bulkm, double shearm,
 
         // 2nd invariant of plastic strain
 #ifdef THREED
-        /* // plastic strain in the principal directions, depls2 is always 0
+        /* // plastic strain in the principle directions, depls2 is always 0
          * double depls1 = alam;
          * double depls3 = -alam * anpsi;
          * double deplsm = (depls1 + depls3) / 3;
@@ -604,7 +603,7 @@ static void elasto_plastic_rs(double bulkm, double shearm,
         // the equations above can be reduce to:
         depls = std::fabs(alam) * std::sqrt((7 + 4*anpsi + 7*anpsi*anpsi) / 18);
 #else
-        /* // plastic strain in the principal directions
+        /* // plastic strain in the principle directions
          * double depls1 = alam;
          * double depls2 = -alam * anpsi;
          * double deplsm = (depls1 + depls2) / 2;
@@ -649,7 +648,6 @@ static void elasto_plastic_rs(double bulkm, double shearm,
         depls = std::fabs(alam) * std::sqrt(3. / 8);
 #endif
     }
-    pmean = std::fabs(0.5 * (p[0] - p[2]));
 
     // rotate the principal stresses back to global axes
     {
@@ -822,11 +820,13 @@ static void elasto_plastic2d_rs(double bulkm, double shearm,
         s[0] = s[1] = syy = ten_max;
         s[2] = 0.0;
         failure_mode = 1;
-        sig1 = sig3 = (ten_max - pp);
     
         double tmp[NSTR];
+        // save reduced principal stresses
+        sig1 = sig3 = (ten_max - pp); 
         tmp[0] = tmp[1] = tmp[2] = sig1;
         double I2pp_new = I2_principal(E, nu, tmp);
+        // save the difference between I2 of reduced principal stresses before and after yielding.
 	    I2pp_diff = I2pp - I2pp_new;
         return;
     }
@@ -935,24 +935,12 @@ void update_stress(const Variables& var, tensor_t& stress,
                    tensor_t& strain, double_vec& plstrain,
                    double_vec& delta_plstrain, tensor_t& strain_rate, double_vec& dpressure)
 {
-    var.avg_shear_stress = 0.;
-    var.avg_vm = 0.;
-    var.slip_area = 0.;
 
     #pragma omp parallel for default(none)                           \
         shared(var, stress, stressyy, dpressure, strain, plstrain, delta_plstrain, \
         strain_rate, dpressure, std::cerr)
     for (int e=0; e<var.nelem; ++e) {
         int rheol_type = var.mat->rheol_type;
-#ifdef RS        
-        // rheol_type has been initialized above as the one specified in the material parameter group in an input file.
-        // However, since we sometimes want to let different elements have different rheology, we call 'update_rheol_type_material()' here.
-        // Special treatment of 'material', i.e., phase id,
-        // is applied here, too.
-        int material = -1;
-        // change rheol_type and material if necessary
-        update_rheol_type_material(var, e, rheol_type, material);
-#endif
 
         // stress, strain and strain_rate of this element
         double* s = stress[e];
@@ -1069,26 +1057,6 @@ void update_stress(const Variables& var, tensor_t& stress,
                 }
             }
             break;
-        case MatProps::rh_elastic_rs:
-            {
-                double bulkm = var.mat->bulkm(e);
-                double shearm = var.mat->shearm(e);
-                elastic(bulkm, shearm, de, s);
-                //update_max_shear(var,e,s);
-            }
-            break;            
-        case MatProps::rh_maxwell_rs:
-            {
-                double bulkm = var.mat->bulkm(e);
-                double shearm = var.mat->shearm(e);
-                double dv = (*var.volume)[e] / (*var.volume_old)[e] - 1;
-                double viscosity = var.mat->visc(e);
-                // double viscosity = get_rate_state_viscosity(var,e);
-                
-                maxwell(bulkm, shearm, viscosity, var.dt, dv, de, s);
-                //update_max_shear(var,e,s);
-            }
-            break;
         case MatProps::rh_ep_rs:
             {
                 double depls = 0;
@@ -1101,9 +1069,11 @@ void update_stress(const Variables& var, tensor_t& stress,
                                        amc, anphi, anpsi, hardn, ten_max);
                 // re-calculate some of the plasticity parameters
                 // for the rate-and-state friction law.
-                const double cohesion = 4.0e6;
-                get_rate_state_plastic_props(var, e, cohesion, amc, anphi, ten_max);
+                get_rate_state_plastic_props(var, e, amc, anphi, ten_max);
 
+                // some potentially useful quantities 
+                // are compute but not stored for now.
+                double sig1, sig3, I2pp_diff;
                 if (var.mat->is_plane_strain) {
                     elasto_plastic2d_rs(bulkm, shearm,
                                 amc, anphi, anpsi,
@@ -1129,7 +1099,7 @@ void update_stress(const Variables& var, tensor_t& stress,
                 double bulkm = var.mat->bulkm(e);
                 double shearm = var.mat->shearm(e);
                 //double viscosity = var.mat->visc(e);
-                double viscosity = get_rate_state_viscosity(var,e);
+                double viscosity = var.mat->visc(e);
                 double dv = (*var.volume)[e] / (*var.volume_old)[e] - 1;
                 // stress due to maxwell rheology
                 double sv[NSTR];
@@ -1147,9 +1117,11 @@ void update_stress(const Variables& var, tensor_t& stress,
 
                 // re-calculate some of the plasticity parameters
                 // for the rate-and-state friction law.
-                const double cohesion = 0.0;
-                get_rate_state_plastic_props(var, e, cohesion, amc, anphi, ten_max);
+                get_rate_state_plastic_props(var, e, amc, anphi, ten_max);
                 
+                // some potentially useful quantities 
+                // are compute but not stored for now.
+                double sig1, sig3, I2pp_diff;
                 if (var.mat->is_plane_strain) {
                     spyy = syy;
                     elasto_plastic2d_rs(bulkm, shearm,
@@ -1191,6 +1163,130 @@ void update_stress(const Variables& var, tensor_t& stress,
     }
 }
 
+
+void get_rate_state_plastic_props(const Variables &var,const int e, double &amc, double &anphi, double &ten_max)
+{
+    double centerxzT[3];
+    double direct_a, evolution_b, a_b, char_vel, mu_static, normal_traction, normal;
+    
+    a_b = var.mat->a_b(e); // input file-provided value
+    // a_b can be overwritten by a custom function that is
+    // called in the following function.
+    get_rate_state_parameters(var, e, double *centerxzT, direct_a, evolution_b, a_b, char_vel, mu_static, normal_traction, normal);
+
+    double SV = get_slip_velocity(var, e);
+    double mu_RS = mu_static + a_b * std::log(SV / char_vel);
+    double phi_RS = std::fabs(std::atan(mu_RS)); 
+
+    // amc = 2 * cohesion * sqrt(anphi)
+    // since anphi might have been changed,
+    // amc_new = 2 * cohesion * sqrt(anphi_new)
+    //         = 2 * cohesion * sqrt(anphi) * sqrt(anphi_new/anphi)
+    //         = amc_old * sqrt(anphi_new/anphi)
+    // 1. retrieve cohesion from amc
+    const double cohesion = 0.5 * cohesion / std::sqrt(anphi);
+    // 2. assign anphi_new to anphi_new_to_old.
+    double anphi_new_to_old = (1.0 + std::sin(phi_RS)) / (1.0 - std::sin(phi_RS)); 
+    // 3. divide by anphi to make anphi_new_to_old the desired ratio.
+    anphi_new_to_old /= anphi;
+    // 4. update amc with the new anphi.
+    amc *= std::sqrt(anphi_new_to_old);
+    
+    ten_max = (phi_RS == 0.0)? 1.0e9 : std::min(1e9, cohesion/mu_RS);
+}
+
+double get_slip_velocity(const Variables &var, const int e)
+{
+    double V_slip_m[3]={0., 0., 0.};
+    double vm_sqrsum = 0.0, vm = 0.0;
+    const int *conn = (*var.connectivity)[e];
+
+    for (int i=0; i<NODES_PER_ELEM; ++i) {
+        for (int j=0; j<NDIMS; ++j)
+            V_slip_m[j] += (*var.vel)[conn[i]][j];
+    }
+    for (int i=0; i < NDIMS; ++i) {
+        V_slip_m[i] /= NODES_PER_ELEM;
+        vm_sqrsum += V_slip_m[i]*V_slip_m[i];
+    }
+    vm = std::sqrt(vm_sqrsum);
+    
+    if (std::isnan(vm) {
+        std::cerr << "Error: V_slip becomes NaN\n";
+        std::exit(11);
+    }
+    if (std::isinf(vm) {
+        std::cerr << "Error: V_slip becomes inf\n";
+        std::exit(11);
+    }
+
+    return std::max(1e-19, vm);
+}
+
+void get_rate_state_parameters( const Varialbes &var, const int e, double *centerxzT, double &direct_a, double &evolution_b, double &a_b, double &char_vel, double &mu_static, double &normal_traction, double &normal)
+{
+    find_element_center_vars(var, e, center_xzT);
+    // find_normal_traction(p, normal_traction, normal);
+
+    // center_xzT[2] is element mean temperautre
+    f_v_gabbro(center_xzT[2], a_b, char_vel, mu_static);
+}
+
+void find_element_center_vars(Variables& var, int e, 
+        double *center_xzT )
+{
+    const int *conn = (*var.connectivity)[e];
+    center_xzT[0] = 0.; // mean x coord of element e
+    center_xzT[1] = 0.; // mean z coord of element e
+    center_xzT[2] = 0.; // mean temperature of element e
+    for (int i=0; i<NODES_PER_ELEM; ++i){
+        center_xzT[0] += (*var.coord)[conn[i]][0];
+        center_xzT[1] += (*var.coord)[conn[i]][NDIMS-1];
+        center_xzT[2] += (*var.temperature)[conn[i]];
+    }
+    for (int i=0; i<3; ++i)
+        center_xzT[i] /= NODES_PER_ELEM;
+}
+
+void find_normal_traction( const double *p, double &normal_traction, double &normal )
+{
+    normal_traction = 0.5*std::fabs(p[0] + p[NDIMS-1]);
+    for (int i=0; i<NDIMS; ++i) normal += p[i] / NDIMS;
+    normal = std::fabs(normal);
+}
+
+double I2_principal(const double E, const double nu, const double p[3])
+{
+    return ( 0.5*(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]) - nu*(p[0]*p[1]+p[1]*p[2]+p[2]*p[0]) ) / E;
+}
+    
+void f_v_granite(const double T, double &a_b, double &characteristic_velocity, double &static_friction_coefficient)
+{
+    int nlayers = 6, n;
+    double ref_T[] = {0., 100., 350., 450., 1000., 2000};
+    double ref_a_b[] = {0.004, -0.004, -0.004, 0.015, 0.1195, 0.3095};
+    for (n = 1; n < nlayers; n++) {
+	    if (T <= ref_T[n]) break;
+    }
+    a_b = ref_a_b[n-1] + (ref_a_b[n] - ref_a_b[n-1]) * (T - ref_T[n-1]) / (ref_T[n] - ref_T[n-1]);
+    static_friction_coefficient = 0.6;// - a_b * log(3.3e-9/1e-6);
+    characteristic_velocity = 1e-9;
+}
+
+void f_v_gabbro(const double T, double &a_b, double &characteristic_velocity, double &static_friction_coefficient)
+{
+    int nlayers = 6, n;
+    double ref_T[] = {0., 100., 416., 520., 1000., 2000,};
+    double ref_a_b[] = {0.0035, -0.0035, -0.0035, 0.001, 0.0218, 0.065};
+    for (n = 1; n < nlayers; n++) {
+        if (T <= ref_T[n]) break;
+    }
+    a_b = ref_a_b[n-1] + (ref_a_b[n] - ref_a_b[n-1]) * (T - ref_T[n-1]) / (ref_T[n] - ref_T[n-1]);
+    static_friction_coefficient = 0.6;// - a_b * log(3.3e-9/1e-6);
+    characteristic_velocity = 1e-6;
+}
+
+#if 0
 void get_principal_stresses(const double* s, double p[NDIMS])
 {
 #ifdef THREED
@@ -1205,7 +1301,6 @@ void get_principal_stresses(const double* s, double p[NDIMS])
 #endif
 }
 
-#if 0
 void update_max_shear(Variables &var, int e, const double *s, int rheol_type)
 {
     double p[NDIMS];
@@ -1248,7 +1343,6 @@ void update_rheol_type_material(const Variables &var, const int e, int &rheol_ty
         rheol_type = MatProps::rh_maxwell_rs;
 }
 
-
 double get_rate_state_viscosity(const Variables &var, const int e, const double* edot, const int material)
 {    
     if (material == 10) {
@@ -1282,94 +1376,6 @@ double get_rate_state_viscosity(const Variables &var, const int e, const double*
         return var.mat->visc(e);
 }
 
-void get_rate_state_plastic_props(const Variables &var,const int e, const double cohesion, double &amc, double &amphi, double &ten_max)
-{
-    double centerxzT[3];
-    double direct_a, evolution_b, a_b, char_vel, mu_static, normal_traction, normal;
-    get_rate_state_parameters(var, e, double *centerxzT, direct_a, evolution_b, a_b, char_vel, mu_static, normal_traction, normal);
-
-#if 0    
-    double mu_dyn = (mu_static + evolution_b*(*var.state1)[e])/direct_a;
-    double A = 2.0*char_vel*std::exp(-mu_dyn);
-#endif
-
-    double SV = std::max(1e-19, (*var.slip_velocity)[e]);
-    double mu_RS = mu_static + (*var.CL)[e] * log(SV / char_vel);
-    double phi_RS = std::fabs(std::atan(mu_RS)); 
-
-    anphi = (1.0 + std::sin(phi_RS)) / (1.0 - std::sin(phi_RS));
-    amc = 2 * cohesion * std::sqrt(anphi);
-    ten_max = (phi_RS == 0.0)? 1.0e9 : std::min(1e9, cohesion/std::tan(phi_RS));
-}
-
-
-void get_rate_state_parameters( const Varialbes &var, const int e, double *centerxzT, double &direct_a, double &evolution_b, double &a_b, double &char_vel, double &mu_static, double &normal_traction, double &normal)
-{
-    find_element_center_vars(var, e, center_xzT);
-    // 45 km is the x coordinate where friction is 
-    // particularly low.
-    find_normal_traction(p, normal_traction, normal);
-    // find_friction_parameters(45.0e3, direct_a, evolution_b,
-    //                     char_vel, mu_static);
-    const double Tmean_elem = center_xzT[2];
-    f_v_gabbro(Tmean_elem, a_b, char_vel, mu_static);
-}
-
-void find_element_center_vars(Variables& var, int e, 
-        double *center_xzT )
-{
-    const int *conn = (*var.connectivity)[e];
-    center_xzT[0] = 0.; // mean x coord of element e
-    center_xzT[1] = 0.; // mean z coord of element e
-    center_xzT[2] = 0.; // mean temperature of element e
-    for (int i=0; i<NODES_PER_ELEM; ++i){
-        center_xzT[0] += (*var.coord)[conn[i]][0];
-        center_xzT[1] += (*var.coord)[conn[i]][NDIMS-1];
-        center_xzT[2] += (*var.temperature)[conn[i]];
-    }
-    for (int i=0; i<3; ++i)
-        center_xzT[i] /= NODES_PER_ELEM;
-}
-
-void find_normal_traction( const double *p, double &normal_traction, double &normal )
-{
-    normal_traction = 0.5*std::fabs(p[0] + p[NDIMS-1]);
-    for (int i=0; i<NDIMS; ++i) normal += p[i] / NDIMS;
-    normal = std::fabs(normal);
-}
-
-double I2_principal(const double E, const double nu, const double p[3])
-{
-    return ( 0.5*(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]) - nu*(p[0]*p[1]+p[1]*p[2]+p[2]*p[0]) ) / E;
-}
-    
-void f_v_granite(double T, double &a_b, double &characteristic_velocity, double &static_friction_coefficient)
-{
-    int nlayers = 6, n;
-    double ref_T[] = {0., 100., 350., 450., 1000., 2000};
-    double ref_a_b[] = {0.004, -0.004, -0.004, 0.015, 0.1195, 0.3095};
-    for (n=1; n<nlayers; n++) {
-	if (T <= ref_T[n]) break;
-    }
-    a_b = ref_a_b[n-1] + (ref_a_b[n] - ref_a_b[n-1]) * (T - ref_T[n-1]) / (ref_T[n] - ref_T[n-1]);
-    static_friction_coefficient = 0.6;// - a_b * log(3.3e-9/1e-6);
-    characteristic_velocity = 1e-9;
-}
-
-void f_v_gabbro(const double T, double &a_b, double &characteristic_velocity, double &static_friction_coefficient)
-{
-    int nlayers = 6, n;
-    double ref_T[] = {0., 100., 416., 520., 1000., 2000,};
-    double ref_a_b[] = {0.0035, -0.0035, -0.0035, 0.001, 0.0218, 0.065};
-    for (n=1; n<nlayers; n++) {
-	if (T <= ref_T[n]) break;
-    }
-    a_b = ref_a_b[n-1] + (ref_a_b[n] - ref_a_b[n-1]) * (T - ref_T[n-1]) / (ref_T[n] - ref_T[n-1]);
-    static_friction_coefficient = 0.6;// - a_b * log(3.3e-9/1e-6);
-    characteristic_velocity = 1e-6;
-}
-
-#if 0
 void find_friction_parameters(double x, double &direct_a, double &evolution_b, double &characteristic_velocity, double &static_friction_coefficient)
 {
     double SV = std::max(1e-19, (*var.slip_velocity)[e]);
@@ -1429,58 +1435,6 @@ void find_friction_parameters(double x, double &direct_a, double &evolution_b, d
         direct_a = T*a+(a5-a*T5);
         evolution_b = T*b+(b5-b*T5);
         characteristic_velocity = T*vc+(vc5-vc*T5);
-    }
-}
-
-void update_state1(const Variables &var, double_vec &state1, double_vec &slip_velocity, int a)
-{
-    const double Vc = 1e-6;
-
-	#pragma omp parallel for default(none) \
-	shared(var, state1, std::cerr, slip_velocity, a) private(Vc)
-    for (int e=0; e<var.nelem; ++e) {
-        // Compute mean velocity vector for element e
-        double vel_mean[3] = {0., 0., 0.};
-        const int *conn = (*var.connectivity)[e];
-        for (int i=0; i<NODES_PER_ELEM; ++i) {
-            for (int j=0; j<NDIMS; ++j)
-                vel_mean[j] += (*var.vel)[conn[i]][j];
-        }
-        for (int j=0; j<NDIMS; ++j)
-            vel_mean[j] /= NODES_PER_ELEM;
-        
-        // Compute the magnitude of the element mean velocity
-        double vel_mean_mag_sqrd = 0.0;
-        for(int j=0; j<NDIMS; ++j)
-            vel_mean_mag_sqrd += (vel_mean[j]*vel_mean[j]);
-        if (std::isnan(vel_mean_mag_sqrd) {
-            std::cerr << "Error: V_slip becomes NaN\n";
-            std::exit(11);
-        }
-        if (std::isinf(vel_mean_mag_sqrd)) {
-            std::cerr << "Error: V_slip becomes inf\n";
-            std::exit(11);
-        }
-        double vel_mean_mag = std::sqrt(vel_mean_mag_sqrd);
-
-        // Assign slip_velocity for element e
-        slip_velocity[e] = std::max(1e-19, vel_mean_mag);
-        
-        double L = (*var.CL)[e]
-        double s1 = state1[e];
-        // Slowness RS
-        if (std::fabs(slip_velocity[e]*var.dt/L) <= Vc)
-            state1[e] = log(exp(s1)*(1-slip_velocity[e]*var.dt/L)+Vc*var.dt/L);
-        else
-            state1[e] = log(Vc/slip_velocity[e]+(exp(s1)-Vc/slip_velocity[e])*exp(0-slip_velocity[e]*var.dt/L));
-
-        // Composite RS --- Kato and Tullis, 2001
-        /*if (slip_velocity[e] == 0)
-            state1[e] += var.dt/YEAR2SEC;
-        else
-            state1[e] += var.dt/YEAR2SEC * (exp(-slip_velocity[e] / 1e-8) - state1[e] * slip_velocity[e] / L * log(state1[e] * slip_velocity[e] / L));
-        */
-
     }
 }
 #endif
