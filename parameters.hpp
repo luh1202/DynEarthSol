@@ -187,7 +187,7 @@ struct Mat {
 
     double_vec heat_capacity;
     double_vec therm_cond;
-
+    double_vec radioactive_heating;
     // plastic parameters
     double_vec pls0, pls1;
     double_vec cohesion0, cohesion1;
