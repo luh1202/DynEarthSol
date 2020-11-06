@@ -153,6 +153,10 @@ void update_temperature(const Param &param, const Variables &var,
      for (int n=0; n<var.nnode; ++n) {
         if ((*var.bcflag)[n] & BOUNDZ1)
             temperature[n] = param.bc.surface_temperature;
+         
+         else if ((*var.bcflag)[n] & BOUNDZ0)
+         temperature[n] = param.bc.mantle_temperature; //fixed bottom boundary temperature
+         
         else
             temperature[n] -= tdot[n] * var.dt / (*var.tmass)[n];
     }
