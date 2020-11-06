@@ -31,6 +31,7 @@ public:
 
     double rho(int e) const;
     double cp(int e) const;
+    double hr(int e) const;
     double k(int e) const;
 
     void plastic_props(int e, double pls,
