@@ -113,7 +113,9 @@ void update_temperature(const Param &param, const Variables &var,
             double D[NODES_PER_ELEM][NODES_PER_ELEM];
 
             const int *conn = (*var.connectivity)[e];
+            
             double kv = var.mat->k(e) *  (*var.volume)[e]; // thermal conductivity * volumn
+            double rh = (var.mat->hr(e))/(var.mat->cp(e)); //Radioactive heating
             const double *shpdx = (*var.shpdx)[e];
 #ifdef THREED
             const double *shpdy = (*var.shpdy)[e];
@@ -136,7 +138,7 @@ void update_temperature(const Param &param, const Variables &var,
                 for (int j=0; j<NODES_PER_ELEM; ++j)
                     diffusion += D[i][j] * temperature[conn[j]];
 
-                tdot[conn[i]] += diffusion * kv;
+                tdot[conn[i]] += diffusion * kv - rh;
             }
         }
     } elemf(var, temperature, tdot);
