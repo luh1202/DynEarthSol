@@ -428,7 +428,7 @@ static void declare_parameters(po::options_description &cfg,
          "Heat capacity (isobaric) of the materials '[d0, d1, d2, ...]' (in J/kg/Kelvin)")
         ("mat.therm_cond", po::value<std::string>()->default_value("[3]"),
          "Thermal conductivity of the materials '[d0, d1, d2, ...]' (in W/m/Kelvin)")
-        ("mat.radioactive_heating", po::value<std::string>()->default_value("[0]"),
+        ("mat.radiogenic_heating", po::value<std::string>()->default_value("[0]"),
        "Radioactive heating of the materials '[d0, d1, d2, ...]' (in W/kg)")
 
         ("mat.pls0", po::value<std::string>()->default_value("[0]"),

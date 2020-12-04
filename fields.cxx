@@ -115,7 +115,7 @@ void update_temperature(const Param &param, const Variables &var,
             const int *conn = (*var.connectivity)[e];
             
             double kv = var.mat->k(e) *  (*var.volume)[e]; // thermal conductivity * volumn
-            double rh = (var.mat->hr(e))/(var.mat->cp(e)); //Radioactive heating
+            double rh = (var.mat->hr(e) / var.mat->cp(e)) * (*var.volume)[e]; //Radiogenic heating rate, (W * kelvin/J) * volume
             const double *shpdx = (*var.shpdx)[e];
 #ifdef THREED
             const double *shpdy = (*var.shpdy)[e];
