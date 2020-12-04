@@ -102,7 +102,8 @@ struct Control {
 struct BC {
     double surface_temperature;
     double mantle_temperature;
-
+    bool has_fixed_bottom_temperature;
+    
     double winkler_delta_rho;
     bool has_winkler_foundation;
 
