@@ -235,6 +235,7 @@ static void declare_parameters(po::options_description &cfg,
          "Surface temperature (in Kelvin)")
         ("bc.mantle_temperature", po::value<double>(&p.bc.mantle_temperature)->default_value(1600),
          "Mantle temperature (in Kelvin)")
+        ("bc.has_fixed_bottom_temperature", po::value<bool>(&p.bc.has_fixed_bottom_temperature)->default_value(true)
         ("bc.has_winkler_foundation", po::value<bool>(&p.bc.has_winkler_foundation)->default_value(true),
          "Using Winkler foundation for the bottom boundary?")
         ("bc.winkler_delta_rho", po::value<double>(&p.bc.winkler_delta_rho)->default_value(0),
