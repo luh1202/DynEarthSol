@@ -790,7 +790,7 @@ static void validate_parameters(const po::variables_map &vm, Param &p)
 
         get_numbers(vm, "mat.heat_capacity", p.mat.heat_capacity, p.mat.nmat, 1);
         get_numbers(vm, "mat.therm_cond", p.mat.therm_cond, p.mat.nmat, 1);
-        get_numbers(vm, "mat.radioactive_heating", p.mat.radioactive_heating, p.mat.nmat, 1);
+        get_numbers(vm, "mat.radiogenic_heating", p.mat.radiogenic_heating, p.mat.nmat, 1);
 
         get_numbers(vm, "mat.pls0", p.mat.pls0, p.mat.nmat, 1);
         get_numbers(vm, "mat.pls1", p.mat.pls1, p.mat.nmat, 1);

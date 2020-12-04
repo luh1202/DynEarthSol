@@ -226,7 +226,7 @@ MatProps::MatProps(const Param& p, const Variables& var) :
     visc_activation_energy = VectorBase::create(p.mat.visc_activation_energy, nmat);
     heat_capacity = VectorBase::create(p.mat.heat_capacity, nmat);
     therm_cond = VectorBase::create(p.mat.therm_cond, nmat);
-    radioactive_heating = VectorBase::create(p.mat.radioactive_heating, nmat);
+    radiogenic_heating = VectorBase::create(p.mat.radiogenic_heating, nmat);
     pls0 = VectorBase::create(p.mat.pls0, nmat);
     pls1 = VectorBase::create(p.mat.pls1, nmat);
     cohesion0 = VectorBase::create(p.mat.cohesion0, nmat);
@@ -249,7 +249,7 @@ MatProps::~MatProps()
     delete visc_activation_energy;
     delete heat_capacity;
     delete therm_cond;
-    delete radioactive_heating;
+    delete radiogenic_heating;
     delete pls0;
     delete pls1;
     delete cohesion0;
@@ -404,7 +404,7 @@ double MatProps::cp(int e) const
 
 double MatProps::hr(int e) const
 {
-    return arithmetic_mean(*radioactive_heating, elemmarkers[e]);
+    return arithmetic_mean(*radiogenic_heating, elemmarkers[e]);
 }
 
 
